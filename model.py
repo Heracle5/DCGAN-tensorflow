@@ -1,9 +1,8 @@
 from __future__ import division
-from __future__ import print_function
 import os
 import time
 import math
-from glob import glob
+from glob import glob  # file path search
 import tensorflow as tf
 import numpy as np
 from six.moves import xrange
@@ -14,19 +13,12 @@ from utils import *
 def conv_out_size_same(size, stride):
   return int(math.ceil(float(size) / float(stride)))
 
-def gen_random(mode, size):
-    if mode=='normal01': return np.random.normal(0,1,size=size)
-    if mode=='uniform_signed': return np.random.uniform(-1,1,size=size)
-    if mode=='uniform_unsigned': return np.random.uniform(0,1,size=size)
-
-
 class DCGAN(object):
   def __init__(self, sess, input_height=108, input_width=108, crop=True,
          batch_size=64, sample_num = 64, output_height=64, output_width=64,
          y_dim=None, z_dim=100, gf_dim=64, df_dim=64,
          gfc_dim=1024, dfc_dim=1024, c_dim=3, dataset_name='default',
-         max_to_keep=1,
-         input_fname_pattern='*.jpg', checkpoint_dir='ckpts', sample_dir='samples', out_dir='./out', data_dir='./data'):
+         input_fname_pattern='*.jpg', checkpoint_dir=None, sample_dir=None):
     """
 
     Args:
@@ -77,37 +69,25 @@ class DCGAN(object):
     self.dataset_name = dataset_name
     self.input_fname_pattern = input_fname_pattern
     self.checkpoint_dir = checkpoint_dir
-    self.data_dir = data_dir
-    self.out_dir = out_dir
-    self.max_to_keep = max_to_keep
 
     if self.dataset_name == 'mnist':
       self.data_X, self.data_y = self.load_mnist()
       self.c_dim = self.data_X[0].shape[-1]
     else:
-      data_path = os.path.join(self.data_dir, self.dataset_name, self.input_fname_pattern)
-      self.data = glob(data_path)
-      if len(self.data) == 0:
-        raise Exception("[!] No data found in '" + data_path + "'")
-      np.random.shuffle(self.data)
-      imreadImg = imread(self.data[0])
+      self.data = glob(os.path.join("./data", self.dataset_name, self.input_fname_pattern))
+      imreadImg = imread(self.data[0]);
       if len(imreadImg.shape) >= 3: #check if image is a non-grayscale image by checking channel number
         self.c_dim = imread(self.data[0]).shape[-1]
       else:
         self.c_dim = 1
 
-      if len(self.data) < self.batch_size:
-        raise Exception("[!] Entire dataset size is less than the configured batch_size")
-    
     self.grayscale = (self.c_dim == 1)
 
     self.build_model()
 
   def build_model(self):
     if self.y_dim:
-      self.y = tf.placeholder(tf.float32, [self.batch_size, self.y_dim], name='y')
-    else:
-      self.y = None
+      self.y= tf.placeholder(tf.float32, [self.batch_size, self.y_dim], name='y')
 
     if self.crop:
       image_dims = [self.output_height, self.output_width, self.c_dim]
@@ -123,11 +103,21 @@ class DCGAN(object):
       tf.float32, [None, self.z_dim], name='z')
     self.z_sum = histogram_summary("z", self.z)
 
-    self.G                  = self.generator(self.z, self.y)
-    self.D, self.D_logits   = self.discriminator(inputs, self.y, reuse=False)
-    self.sampler            = self.sampler(self.z, self.y)
-    self.D_, self.D_logits_ = self.discriminator(self.G, self.y, reuse=True)
-    
+    if self.y_dim:
+      self.G = self.generator(self.z, self.y)
+      self.D, self.D_logits = \
+          self.discriminator(inputs, self.y, reuse=False)
+
+      self.sampler = self.sampler(self.z, self.y)
+      self.D_, self.D_logits_ = \
+          self.discriminator(self.G, self.y, reuse=True)
+    else:
+      self.G = self.generator(self.z)
+      self.D, self.D_logits = self.discriminator(inputs)
+
+      self.sampler = self.sampler(self.z)
+      self.D_, self.D_logits_ = self.discriminator(self.G, reuse=True)
+
     self.d_sum = histogram_summary("d", self.D)
     self.d__sum = histogram_summary("d_", self.D_)
     self.G_sum = image_summary("G", self.G)
@@ -147,7 +137,7 @@ class DCGAN(object):
 
     self.d_loss_real_sum = scalar_summary("d_loss_real", self.d_loss_real)
     self.d_loss_fake_sum = scalar_summary("d_loss_fake", self.d_loss_fake)
-                          
+
     self.d_loss = self.d_loss_real + self.d_loss_fake
 
     self.g_loss_sum = scalar_summary("g_loss", self.g_loss)
@@ -158,7 +148,7 @@ class DCGAN(object):
     self.d_vars = [var for var in t_vars if 'd_' in var.name]
     self.g_vars = [var for var in t_vars if 'g_' in var.name]
 
-    self.saver = tf.train.Saver(max_to_keep=self.max_to_keep)
+    self.saver = tf.train.Saver()
 
   def train(self, config):
     d_optim = tf.train.AdamOptimizer(config.learning_rate, beta1=config.beta1) \
@@ -170,16 +160,14 @@ class DCGAN(object):
     except:
       tf.initialize_all_variables().run()
 
-    if config.G_img_sum:
-      self.g_sum = merge_summary([self.z_sum, self.d__sum, self.G_sum, self.d_loss_fake_sum, self.g_loss_sum])
-    else:
-      self.g_sum = merge_summary([self.z_sum, self.d__sum, self.d_loss_fake_sum, self.g_loss_sum])
+    self.g_sum = merge_summary([self.z_sum, self.d__sum,
+      self.G_sum, self.d_loss_fake_sum, self.g_loss_sum])
     self.d_sum = merge_summary(
         [self.z_sum, self.d_sum, self.d_loss_real_sum, self.d_loss_sum])
-    self.writer = SummaryWriter(os.path.join(self.out_dir, "logs"), self.sess.graph)
+    self.writer = SummaryWriter("./logs", self.sess.graph)
 
-    sample_z = gen_random(config.z_dist, size=(self.sample_num , self.z_dim))
-    
+    sample_z = np.random.uniform(-1, 1, size=(self.sample_num , self.z_dim))
+
     if config.dataset == 'mnist':
       sample_inputs = self.data_X[0:self.sample_num]
       sample_labels = self.data_y[0:self.sample_num]
@@ -197,7 +185,7 @@ class DCGAN(object):
         sample_inputs = np.array(sample).astype(np.float32)[:, :, :, None]
       else:
         sample_inputs = np.array(sample).astype(np.float32)
-  
+
     counter = 1
     start_time = time.time()
     could_load, checkpoint_counter = self.load(self.checkpoint_dir)
@@ -210,13 +198,12 @@ class DCGAN(object):
     for epoch in xrange(config.epoch):
       if config.dataset == 'mnist':
         batch_idxs = min(len(self.data_X), config.train_size) // config.batch_size
-      else:      
+      else:
         self.data = glob(os.path.join(
-          config.data_dir, config.dataset, self.input_fname_pattern))
-        np.random.shuffle(self.data)
+          "./data", config.dataset, self.input_fname_pattern))
         batch_idxs = min(len(self.data), config.train_size) // config.batch_size
 
-      for idx in xrange(0, int(batch_idxs)):
+      for idx in xrange(0, batch_idxs):
         if config.dataset == 'mnist':
           batch_images = self.data_X[idx*config.batch_size:(idx+1)*config.batch_size]
           batch_labels = self.data_y[idx*config.batch_size:(idx+1)*config.batch_size]
@@ -235,13 +222,13 @@ class DCGAN(object):
           else:
             batch_images = np.array(batch).astype(np.float32)
 
-        batch_z = gen_random(config.z_dist, size=[config.batch_size, self.z_dim]) \
+        batch_z = np.random.uniform(-1, 1, [config.batch_size, self.z_dim]) \
               .astype(np.float32)
 
         if config.dataset == 'mnist':
           # Update D network
           _, summary_str = self.sess.run([d_optim, self.d_sum],
-            feed_dict={ 
+            feed_dict={
               self.inputs: batch_images,
               self.z: batch_z,
               self.y:batch_labels,
@@ -251,7 +238,7 @@ class DCGAN(object):
           # Update G network
           _, summary_str = self.sess.run([g_optim, self.g_sum],
             feed_dict={
-              self.z: batch_z, 
+              self.z: batch_z,
               self.y:batch_labels,
             })
           self.writer.add_summary(summary_str, counter)
@@ -260,9 +247,9 @@ class DCGAN(object):
           _, summary_str = self.sess.run([g_optim, self.g_sum],
             feed_dict={ self.z: batch_z, self.y:batch_labels })
           self.writer.add_summary(summary_str, counter)
-          
+
           errD_fake = self.d_loss_fake.eval({
-              self.z: batch_z, 
+              self.z: batch_z,
               self.y:batch_labels
           })
           errD_real = self.d_loss_real.eval({
@@ -288,16 +275,17 @@ class DCGAN(object):
           _, summary_str = self.sess.run([g_optim, self.g_sum],
             feed_dict={ self.z: batch_z })
           self.writer.add_summary(summary_str, counter)
-          
+
           errD_fake = self.d_loss_fake.eval({ self.z: batch_z })
           errD_real = self.d_loss_real.eval({ self.inputs: batch_images })
           errG = self.g_loss.eval({self.z: batch_z})
 
-        print("[%8d Epoch:[%2d/%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
-          % (counter, epoch, config.epoch, idx, batch_idxs,
+        counter += 1
+        print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
+          % (epoch, idx, batch_idxs,
             time.time() - start_time, errD_fake+errD_real, errG))
 
-        if np.mod(counter, config.sample_freq) == 0:
+        if np.mod(counter, 100) == 1:
           if config.dataset == 'mnist':
             samples, d_loss, g_loss = self.sess.run(
               [self.sampler, self.d_loss, self.g_loss],
@@ -308,8 +296,8 @@ class DCGAN(object):
               }
             )
             save_images(samples, image_manifold_size(samples.shape[0]),
-                  './{}/train_{:08d}.png'.format(config.sample_dir, counter))
-            print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss)) 
+                  './{}/train_{:02d}_{:04d}.png'.format(config.sample_dir, epoch, idx))
+            print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
           else:
             try:
               samples, d_loss, g_loss = self.sess.run(
@@ -320,16 +308,14 @@ class DCGAN(object):
                 },
               )
               save_images(samples, image_manifold_size(samples.shape[0]),
-                    './{}/train_{:08d}.png'.format(config.sample_dir, counter))
-              print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss)) 
+                    './{}/train_{:02d}_{:04d}.png'.format(config.sample_dir, epoch, idx))
+              print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
             except:
               print("one pic error!...")
 
-        if np.mod(counter, config.ckpt_freq) == 0:
+        if np.mod(counter, 500) == 2:
           self.save(config.checkpoint_dir, counter)
-        
-        counter += 1
-        
+
   def discriminator(self, image, y=None, reuse=False):
     with tf.variable_scope("discriminator") as scope:
       if reuse:
@@ -351,14 +337,14 @@ class DCGAN(object):
         h0 = conv_cond_concat(h0, yb)
 
         h1 = lrelu(self.d_bn1(conv2d(h0, self.df_dim + self.y_dim, name='d_h1_conv')))
-        h1 = tf.reshape(h1, [self.batch_size, -1])      
+        h1 = tf.reshape(h1, [self.batch_size, -1])
         h1 = concat([h1, y], 1)
-        
+
         h2 = lrelu(self.d_bn2(linear(h1, self.dfc_dim, 'd_h2_lin')))
         h2 = concat([h2, y], 1)
 
         h3 = linear(h2, 1, 'd_h3_lin')
-        
+
         return tf.nn.sigmoid(h3), h3
 
   def generator(self, z, y=None):
@@ -473,8 +459,8 @@ class DCGAN(object):
         return tf.nn.sigmoid(deconv2d(h2, [self.batch_size, s_h, s_w, self.c_dim], name='g_h3'))
 
   def load_mnist(self):
-    data_dir = os.path.join(self.data_dir, self.dataset_name)
-    
+    data_dir = os.path.join("./data", self.dataset_name)
+
     fd = open(os.path.join(data_dir,'train-images-idx3-ubyte'))
     loaded = np.fromfile(file=fd,dtype=np.uint8)
     trX = loaded[16:].reshape((60000,28,28,1)).astype(np.float)
@@ -493,20 +479,20 @@ class DCGAN(object):
 
     trY = np.asarray(trY)
     teY = np.asarray(teY)
-    
+
     X = np.concatenate((trX, teX), axis=0)
     y = np.concatenate((trY, teY), axis=0).astype(np.int)
-    
+
     seed = 547
     np.random.seed(seed)
     np.random.shuffle(X)
     np.random.seed(seed)
     np.random.shuffle(y)
-    
+
     y_vec = np.zeros((len(y), self.y_dim), dtype=np.float)
     for i, label in enumerate(y):
       y_vec[i,y[i]] = 1.0
-    
+
     return X/255.,y_vec
 
   @property
@@ -515,38 +501,27 @@ class DCGAN(object):
         self.dataset_name, self.batch_size,
         self.output_height, self.output_width)
 
-  def save(self, checkpoint_dir, step, filename='model', ckpt=True, frozen=False):
-    # model_name = "DCGAN.model"
-    # checkpoint_dir = os.path.join(checkpoint_dir, self.model_dir)
+  def save(self, checkpoint_dir, step):
+    model_name = "DCGAN.model"
+    checkpoint_dir = os.path.join(checkpoint_dir, self.model_dir)
 
-    filename += '.b' + str(self.batch_size)
     if not os.path.exists(checkpoint_dir):
       os.makedirs(checkpoint_dir)
 
-    if ckpt:
-      self.saver.save(self.sess,
-              os.path.join(checkpoint_dir, filename),
-              global_step=step)
-
-    if frozen:
-      tf.train.write_graph(
-              tf.graph_util.convert_variables_to_constants(self.sess, self.sess.graph_def, ["generator_1/Tanh"]),
-              checkpoint_dir,
-              '{}-{:06d}_frz.pb'.format(filename, step),
-              as_text=False)
+    self.saver.save(self.sess,
+            os.path.join(checkpoint_dir, model_name),
+            global_step=step)
 
   def load(self, checkpoint_dir):
-    #import re
-    print(" [*] Reading checkpoints...", checkpoint_dir)
-    # checkpoint_dir = os.path.join(checkpoint_dir, self.model_dir)
-    # print("     ->", checkpoint_dir)
+    import re
+    print(" [*] Reading checkpoints...")
+    checkpoint_dir = os.path.join(checkpoint_dir, self.model_dir)
 
     ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
     if ckpt and ckpt.model_checkpoint_path:
       ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
       self.saver.restore(self.sess, os.path.join(checkpoint_dir, ckpt_name))
-      #counter = int(next(re.finditer("(\d+)(?!.*\d)",ckpt_name)).group(0))
-      counter = int(ckpt_name.split('-')[-1])
+      counter = int(next(re.finditer("(\d+)(?!.*\d)",ckpt_name)).group(0))
       print(" [*] Success to read {}".format(ckpt_name))
       return True, counter
     else:
